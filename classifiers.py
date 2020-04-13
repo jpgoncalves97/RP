@@ -3,10 +3,24 @@ from sklearn.metrics.pairwise import euclidean_distances
 from tqdm import tqdm
 from sklearn.metrics import confusion_matrix
 import pandas as pd
+from sklearn.model_selection import StratifiedKFold
+import matplotlib.pyplot as plt
+import seaborn as sn
 
 
-def get_results(targets, predictions, labels):
+def get_conf_matrix(targets, predictions):
+    labels = np.unique(targets)
     return pd.DataFrame(confusion_matrix(targets, predictions), columns=labels, index=labels)
+
+
+def plot_conf_matrix(targets, predictions):
+    labels = np.unique(targets)
+    matrix = get_conf_matrix(targets, predictions)
+    plt.figure()
+    sn.heatmap(matrix, annot=True, cmap='Blues', fmt='d', xticklabels=labels, yticklabels=labels)
+    plt.xlabel('Predicted class')
+    plt.ylabel('True class')
+    plt.show()
 
 
 def set_targets(df, act_df, scenario):
@@ -18,26 +32,58 @@ def set_targets(df, act_df, scenario):
         df['TARGET'] = df.apply(lambda row: act_df.loc[row['ACTIVITY'], 'desc'], axis=1)
     return df
 
-
 # https://stackoverflow.com/questions/31324218/scikit-learn-how-to-obtain-true-positive-true-negative-false-positive-and-fal
-def matrix_stats(df):
-    fp = df.sum(axis=0) - np.diag(df)
-    fn = df.sum(axis=1) - np.diag(df)
-    tp = np.diag(df)
-    tn = df.values.sum() - (fp + fn + tp)
-    # Sensitivity, hit rate, recall, or true positive rate
-    tpr = tp / (tp + fn)
-    # Specificity or true negative rate
-    tnr = tn / (tn + fp)
-
-    # Overall accuracy
-    acc = (tp + tn) / (tp + fp + fn + tn)
-    return acc, tpr, tnr, fp, fn, tp, tn
-
 
 def classify_all(classifier, df):
     df = df.select_dtypes(include=np.number)
-    return [classifier.classify(df.iloc[i]) for i in tqdm(range(df.shape[0]))]
+    return [classifier.fit(df.iloc[i]) for i in tqdm(range(df.shape[0]))]
+
+
+def get_results(targets, predictions):
+    conf_matrix = get_conf_matrix(targets, predictions)
+
+    tp = conf_matrix.loc['jogging', 'jogging']
+    fn = conf_matrix.loc['jogging', 'not jogging']
+    tn = conf_matrix.loc['not jogging', 'not jogging']
+    fp = conf_matrix.loc['not jogging', 'jogging']
+
+    acc = (tp+tn)/(tp+tn+fn+fp)
+    tpr = tp / (tp + fn)
+    tnr = tn / (tn + fp)
+
+    return acc, tpr, tnr, tp, tn, fp, fn
+
+
+def cross_validation(df, n_splits, classifiers):
+    skf = StratifiedKFold(n_splits=n_splits)
+    accs = [[] for _ in range(len(classifiers))]
+    tprs = [[] for _ in range(len(classifiers))]
+    tnrs = [[] for _ in range(len(classifiers))]
+    targets = []
+    predictions = [[] for _ in range(len(classifiers))]
+    print('Cross validation')
+    for i, (train, test) in enumerate(skf.split(df, df['TARGET'])):
+        print(i+1)
+        train_df = df.iloc[train]
+        test_df = df.iloc[test]
+        for t in test_df['TARGET']:
+            targets.append(t)
+        for ind, classifier in enumerate(classifiers):
+            c = classifier(train_df)
+            cur_predictions = classify_all(c, test_df)
+            for p in cur_predictions:
+                predictions[ind].append(p)
+            se, sp, acc, tp, tn, fp, fn = get_results(test_df['TARGET'], cur_predictions)
+            accs[ind].append(acc)
+            tprs[ind].append(se)
+            tnrs[ind].append(sp)
+    n = 4
+    for i, c in enumerate(classifiers):
+        print(c.__name__)
+        print('Accuracy =', round(np.mean(accs[i]), n), '+-', round(np.std(accs[i])*2, n))
+        print('Sensitivity =', round(np.mean(tprs[i]), n), '+-', round(np.std(tprs[i]) * 2, n))
+        print('Specificity =', round(np.mean(tnrs[i]), n), '+-', round(np.std(tnrs[i]) * 2, n))
+    return targets, predictions
 
 
 def mul_lists(l1, l2):
@@ -57,7 +103,7 @@ class MinimumDistanceClassifier:
             self.classes.append(name)
             self.class_prototypes.append(group.mean(numeric_only=True).to_numpy())
 
-    def classify(self, data):
+    def fit(self, data):
         distances = euclidean_distances([data], self.class_prototypes)
         min_index = np.argmin(distances)
         return self.classes[min_index]
@@ -109,5 +155,5 @@ class FisherClassifier:
         self.bias = (mul_lists(self.w_t, m1) + mul_lists(self.w_t, m2)) / 2
         # print('bias', self.bias, sep='\n')
 
-    def classify(self, data):
+    def fit(self, data):
         return self.classes[0] if mul_lists(self.w_t, data) - self.bias >= 0 else self.classes[1]
